@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SpatialBench Human Baseline</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 900px; margin: auto; }
+    .question { margin-bottom: 22px; border: 1px solid #ddd; padding: 15px; border-radius: 10px; }
+    button { background-color: #1a8032; color: white; padding: 10px 20px; border: none; cursor: pointer; border-radius: 40px; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    #message { margin-top: 20px; font-weight: bold; }
+    .already_done { color:red; }
+
+    .text-container {
+      position: relative;
+      height: 50px;
+      width: 260px;
+      font-family: sans-serif;
+      font-size: 20px;
+      color: rgb(5, 1, 255);
+    }
+    .blink {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      opacity: 0;
+      margin: 0;
+      animation: blink 4s linear infinite;
+    }
+    .blink:nth-child(1) { animation-delay: 0s; }
+    .blink:nth-child(2) { animation-delay: 0.8s; }
+    .blink:nth-child(3) { animation-delay: 1.6s; }
+    .blink:nth-child(4) { animation-delay: 2.4s; }
+    .blink:nth-child(5) { animation-delay: 3.2s; }
+    @keyframes blink {
+      0% { opacity: 0; transform: translateY(10px); }
+      5% { opacity: 1; transform: translateY(0); }
+      20% { opacity: 1; }
+      25% { opacity: 0; }
+      100% { opacity: 0; }
+    }
+
+    .top-card { border: 1px solid #ddd; padding: 14px 16px; border-radius: 10px; margin: 16px 0; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input[type="text"] { padding: 8px 10px; border-radius: 10px; border: 1px solid #ccc; width: 240px; }
+
+    .image-row {
+      display: grid;
+      gap: 12px;
+      margin: 12px 0;
+    }
+    .image-row img {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid #ddd;
+      display: block;
+    }
+
+    .q-text { font-size: 16px; line-height: 1.35; margin: 8px 0 12px; }
+    .choices { display: grid; gap: 10px; margin: 10px 0 0; }
+    .choice {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      cursor: pointer;
+      background: white;
+    }
+    .choice:hover { background: #fafafa; }
+    .choice input { margin-top: 3px; }
+
+    .muted { color: #666; font-size: 14px; }
+    .warn { color: #b00020; font-weight: 700; margin-top: 10px; }
+  </style>
+</head>
+
+<body>
+  <h1>SpatialBench: Analyzing Spatial Perception Capabilities of MLLMs in Multi-Agent systems</h1>
+  <br><br>
+
+  <strong>Quiz Description:</strong>
+  Analyze the provided images, and follow the prompt and question to select the best answer choice.
+  <br><br>
+
+  <strong>Goal:</strong>
+  Select the option that correctly answers the question.
+  <br><br>
+
+  <strong>Setup:</strong>
+  <ul>
+    <li>Each image corresponds to a numerically labelled agent. Agents follow 1-based indexing</li>
+    <li>The agents are labelled according to the order in which the images appear</li>
+    <li>The first image was captured by Agent 1, the second image was captured by Agent 2, etc.</li>
+  </ul>
+
+  <br>
+  <strong>Competitors:</strong> <br>
+  <div class="text-container">
+    <p class="blink">GPT-4o</p>
+    <p class="blink">Gemini 2.5 Pro</p>
+    <p class="blink">Qwen2.5-VL-7b-Instruct</p>
+    <p class="blink">LLaVA-NeXT-Video-7B</p>
+    <p class="blink">InternVL</p>
+  </div>
+
+  <br><br>
+
+  <div class="top-card">
+    <div class="row">
+      <button id="startBtn" type="button">Load Questions</button>
+    </div>
+    <p class="muted">
+      After loading, please answer all questions and click “Submit Answers”.
+      Do not refresh the page unless you are okay restarting.
+    </p>
+    <div id="startWarn" class="warn" style="display:none;"></div>
+  </div>
+
+  <form id="quizForm" name="submit-to-google-sheet">
+    <div id="questionsRoot"></div>
+
+    <button id="submitBtn" type="button" disabled>Submit Answers</button>
+  </form>
+
+  <p id="message"></p>
+
+  <script>
+    // === CONFIG ===
+    const scriptURL = 'https://script.google.com/macros/s/AKfycbyLlXYJpyxhVumtTrmjGavA-u-k3XCHujrJP2fIezCTjvrBTbHxn1TrmdTsknZYocpEug/exec';
+
+    // File served by GitHub Pages / local server, in same folder as index.html:
+    const DATASET_JSON = 'human_baseline.json';
+
+    // How many questions each participant answers:
+    const QUESTIONS_PER_PARTICIPANT = 5;  // change to 20/30/50 etc.
+
+    // === DOM ===
+    const startBtn = document.getElementById('startBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const questionsRoot = document.getElementById('questionsRoot');
+    const msg = document.getElementById('message');
+    const startWarn = document.getElementById('startWarn');
+
+    let selectedSamples = []; // the K samples shown on page
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+    }
+
+    function pickKIndices(k, n) {
+      const idx = Array.from({ length: n }, (_, i) => i);
+      shuffle(idx);
+      return idx.slice(0, Math.min(k, n));
+    }
+
+    function createQuestionBlock(sample, qNumber) {
+      // sample has: {id, skill, images, question, choices, ...}
+      const qDiv = document.createElement('div');
+      qDiv.className = 'question';
+      qDiv.dataset.sampleId = String(sample.id);
+
+      // meta line (optional, but useful for debugging / analysis)
+      const meta = document.createElement('div');
+      meta.className = 'muted';
+      const nAgents = Array.isArray(sample.images) ? sample.images.length : 0;
+      meta.textContent = `Q${qNumber} · Skill: ${sample.skill ?? 'unknown'} · Agents: ${nAgents} · ID: ${sample.id}`;
+      qDiv.appendChild(meta);
+
+      // images (ORDER PRESERVED)
+      const imgRow = document.createElement('div');
+      imgRow.className = 'image-row';
+      imgRow.style.gridTemplateColumns = `repeat(${nAgents}, 1fr)`;
+
+      (sample.images || []).forEach((src) => {
+        const img = document.createElement('img');
+        img.src = src;          // IMPORTANT: uses JSON order exactly
+        img.alt = 'SpatialBench image';
+        imgRow.appendChild(img);
+      });
+      qDiv.appendChild(imgRow);
+
+      // question text
+      const qText = document.createElement('div');
+      qText.className = 'q-text';
+      qText.textContent = sample.question ?? '(missing question)';
+      qDiv.appendChild(qText);
+
+      // choices (ORDER PRESERVED)
+      const choices = document.createElement('div');
+      choices.className = 'choices';
+
+      const groupName = `q_${sample.id}`; // unique per question
+
+      (sample.choices || []).forEach((choiceText, i) => {
+        const label = document.createElement('label');
+        label.className = 'choice';
+
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = groupName; // same name -> one selection
+        radio.value = String(i);
+
+        // when any radio changes, re-check completeness
+        radio.addEventListener('change', () => {
+          startWarn.style.display = 'none';
+          updateSubmitEnabled();
+        });
+
+        const span = document.createElement('span');
+        span.textContent = choiceText;
+
+        label.appendChild(radio);
+        label.appendChild(span);
+        choices.appendChild(label);
+      });
+
+      qDiv.appendChild(choices);
+      return qDiv;
+    }
+
+    function updateSubmitEnabled() {
+      if (selectedSamples.length === 0) {
+        submitBtn.disabled = true;
+        return;
+      }
+
+      // all questions must have an answer
+      const allAnswered = selectedSamples.every((s) => {
+        const group = `q_${s.id}`;
+        return document.querySelector(`input[name="${group}"]:checked`) !== null;
+      });
+
+      submitBtn.disabled = !allAnswered;
+    }
+
+    async function loadAndRenderQuestions() {
+      msg.textContent = 'Loading dataset…';
+      questionsRoot.innerHTML = '';
+      submitBtn.disabled = true;
+
+      const res = await fetch(DATASET_JSON, { cache: 'no-store' });
+      const allSamples = await res.json();
+
+      // Choose K samples without replacement
+      const idx = pickKIndices(QUESTIONS_PER_PARTICIPANT, allSamples.length);
+      selectedSamples = idx.map(i => allSamples[i]);
+
+      // Render all selected questions
+      selectedSamples.forEach((sample, i) => {
+        const block = createQuestionBlock(sample, i + 1);
+        questionsRoot.appendChild(block);
+      });
+
+      msg.textContent = `Loaded ${selectedSamples.length} questions. Please answer all questions to enable submission.`;
+      updateSubmitEnabled();
+    }
+
+    async function submitAnswers() {
+      // Safety: ensure all answered
+      const allAnswered = selectedSamples.every((s) => {
+        const group = `q_${s.id}`;
+        return document.querySelector(`input[name="${group}"]:checked`) !== null;
+      });
+      if (!allAnswered) {
+        msg.textContent = 'Please answer all questions before submitting.';
+        return;
+      }
+
+      submitBtn.disabled = true;
+      msg.textContent = 'Sending answers…';
+
+      try {
+        // Send one POST per answered question (robust with Google Sheets)
+        for (const s of selectedSamples) {
+          const group = `q_${s.id}`;
+          const selected = document.querySelector(`input[name="${group}"]:checked`);
+          const choiceIndex = Number(selected.value);
+          const choiceText = (s.choices || [])[choiceIndex] ?? '';
+
+          const fd = new FormData();
+          // Anonymous: no participant ID
+          fd.append('participant_id', '');
+          fd.append('sample_id', String(s.id));
+          fd.append('skill', String(s.skill ?? ''));
+          fd.append('num_images', String((s.images || []).length));
+          fd.append('choice_index', String(choiceIndex));
+          fd.append('choice_text', choiceText);
+
+          // Optional: store image list for debugging/traceability
+          fd.append('images', JSON.stringify(s.images || []));
+
+          await fetch(scriptURL, { method: 'POST', body: fd });
+        }
+
+        msg.textContent = 'Success! Your answers are saved in the Sheet.';
+      } catch (err) {
+        msg.textContent = 'Error! ' + err.message;
+        submitBtn.disabled = false; // allow retry
+      }
+    }
+
+    // Wire buttons
+    startBtn.addEventListener('click', loadAndRenderQuestions);
+    submitBtn.addEventListener('click', submitAnswers);
+  </script>
+</body>
+</html>
